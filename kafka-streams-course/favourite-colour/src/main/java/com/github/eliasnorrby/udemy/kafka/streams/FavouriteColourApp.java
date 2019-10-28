@@ -3,20 +3,17 @@ package com.github.eliasnorrby.udemy.kafka.streams;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
+import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.KTable;
-import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.kstream.Materialized;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Properties;
 
 public class FavouriteColourApp {
-
-//  public static String[] allowedColours = new String[] { "red", "green", "blue" };
-  public static ArrayList<String> allowedColours = new ArrayList<>(Arrays.asList("red", "green", "blue"));
 
   public static void main(String[] args) {
 
@@ -27,31 +24,41 @@ public class FavouriteColourApp {
     config.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass());
     config.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass());
 
+    // we disable the cache to demonstrate all the 'steps' involved in the transformations - not recommended in prod
+    config.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, "0");
+
     StreamsBuilder builder = new StreamsBuilder();
 
+    // Step 1: We create the topic of user keys to colours
     KStream<String, String> colourInput = builder.stream("favourite-colour-input");
 
-    KStream<String, String> favUpdates = colourInput
-      .mapValues(pair -> pair.toLowerCase())
-      .mapValues(pair -> Arrays.asList(pair.split(",")))
-      // Basic validation
-      .filter((key, pair) -> pair.size() == 2)
-      // Set user as key
-      .selectKey((key, pair) -> pair.get(0))
-      // Set colour as value
-      .mapValues(pair -> pair.get(1));
+    KStream<String, String> usersAndColours = colourInput
+      // 1 - we ensure that a comma is here as we will split on it
+      .filter((key, value) -> value.contains(","))
+      // 2 - we select a key that will be the user id (lowercase for safety)
+      .selectKey((key, value) -> value.split(",")[0].toLowerCase())
+      // 3 - we get the colour from the value (lowercase for safety)
+      .mapValues(value -> value.split(",")[1].toLowerCase())
+      // 4 - we filter undesired colours (could be a data sanitization step)
+      .filter((user, colour) -> Arrays.asList("green", "blue", "red").contains(colour));
 
-    KStream<String, String> favInput = favUpdates.through("favourite-colour-updates");
+    usersAndColours.to("user-keys-and-colours");
 
-    KTable<String, Long> colourCounts = favInput
-      .selectKey((ignoredKey, colour) -> colour)
-      .filter((key, colour) -> allowedColours.contains(colour))
-      .groupByKey()
-      .count();
 
-    colourCounts.toStream().to("favourite-colour-output", Produced.with(Serdes.String(), Serdes.Long()));
+    // Step 2: We read that topic as a KTable so that updates are read correctly
+    KTable<String, String> usersAndColoursTable = builder.table("user-keys-and-colours");
+
+    // Step 3: We count the occurrences of colours
+    KTable<String, Long> favouriteColours = usersAndColoursTable
+      // 5 - we group by colour within the KTable
+      .groupBy((user, colour) -> new KeyValue<>(colour, colour))
+      .count(Materialized.as("CountsByColours"));
+
+    favouriteColours.toStream().to("favourite-colour-output");
 
     KafkaStreams streams = new KafkaStreams(builder.build(), config);
+    // only do this in dev - not in prod
+    streams.cleanUp();
     streams.start();
 
     // print the topology
@@ -60,16 +67,6 @@ public class FavouriteColourApp {
     // shutdown hook to correctly close the streams application
     Runtime.getRuntime().addShutdownHook(new Thread(streams::close));
 
-
-//    KTable<String, Long> colourCounts = colourInput
-//      .mapValues(pair -> pair.toLowerCase())
-//      .mapValues(pair -> Arrays.asList(pair.split(",")))
-//      .filter((key, pair) -> pair.size() == 2)
-//      .selectKey((key, pair) -> pair.get(0))
-//      .mapValues(pair -> pair.get(1))
-//      .filter((key, pair) -> allowedColours.contains(pair))
-//      .groupByKey()
-//      .count();
   }
 
 }
